@@ -137,12 +137,19 @@ cget_parse_eta_token() {
 cget_progress_parser() {
   local line fields n pct total_b recv_b avg_bps cur_bps eta_secs eta_str
   local total_tok recv_tok avg_tok cur_tok left_tok
+  # Bytes already on disk before this transfer (curl -C -). Curl's progress
+  # meter only reports the current Range, so we add this offset back to show
+  # overall file progress instead of "restarting" at 0%.
+  local resume_from=${CGET_RESUME_FROM:-0}
+  [[ "$resume_from" =~ ^[0-9]+$ ]] || resume_from=0
+
   # Read CR-delimited updates from curl --progress-meter
   while IFS= read -r -d $'\r' line || [[ -n "${line:-}" ]]; do
     # Drop any leftover newlines / header rows
     line=${line//$'\n'/ }
     [[ "$line" == *'%'*Total* ]] && continue
     [[ "$line" == *Dload* && "$line" == *Upload* ]] && continue
+    [[ "$line" == *'Resuming transfer'* ]] && continue
     # shellcheck disable=SC2206
     fields=($line)
     n=${#fields[@]}
@@ -167,9 +174,21 @@ cget_progress_parser() {
     avg_bps=$(cget_to_bytes "$avg_tok")
     cur_bps=$(cget_to_bytes "$cur_tok")
 
-    # Prefer precise percent from byte counts when total known
-    if (( total_b > 0 )); then
-      pct=$(awk -v r="$recv_b" -v t="$total_b" 'BEGIN { printf "%.1f", (r * 100) / t }')
+    # Map Range progress → whole-file progress when resuming.
+    # curl total/received are for this request only; full size is offset+total.
+    local show_total=$total_b show_recv=$recv_b
+    if (( resume_from > 0 )); then
+      if (( total_b > 0 )); then
+        show_total=$((resume_from + total_b))
+        show_recv=$((resume_from + recv_b))
+      else
+        show_recv=$((resume_from + recv_b))
+        show_total=0
+      fi
+    fi
+
+    if (( show_total > 0 )); then
+      pct=$(awk -v r="$show_recv" -v t="$show_total" 'BEGIN { printf "%.1f", (r * 100) / t }')
     else
       pct=$(awk -v p="$pct" 'BEGIN { printf "%.1f", p+0 }')
     fi
@@ -178,12 +197,11 @@ cget_progress_parser() {
     if (( eta_secs < 0 )) && (( cur_bps > 0 && total_b > recv_b )); then
       eta_secs=$(( (total_b - recv_b) / cur_bps ))
     fi
-    # Finished (or unknown left): show 00:00 once bytes are complete
     if (( total_b > 0 && recv_b >= total_b )); then
       eta_secs=0
     fi
 
-    if (( total_b <= 0 )); then
+    if (( show_total <= 0 )); then
       printf '\r[Download]    ?%% of        ? at %12s (%s Ø)    ETA --:--' \
         "$(cget_fmt_speed "$cur_bps")" \
         "$(cget_fmt_avg_speed "$avg_bps")" >&2
@@ -196,7 +214,7 @@ cget_progress_parser() {
       # [Download]   1.9% of   73.91MiB at   54.19KiB/s (50 KiB/s Ø)    ETA 22:50
       printf '\r[Download] %5s%% of %9s at %12s (%s Ø)    ETA %s' \
         "$pct" \
-        "$(cget_fmt_size "$total_b")" \
+        "$(cget_fmt_size "$show_total")" \
         "$(cget_fmt_speed "$cur_bps")" \
         "$(cget_fmt_avg_speed "$avg_bps")" \
         "$eta_str" >&2
@@ -438,8 +456,10 @@ cget_run_one() {
 
   # Auto-resume when the target already exists and has data (wget -c behaviour
   # without requiring -c every time). Skip for stdout.
+  local resume_from=0
   if [[ -n "$target" && -f "$target" && -s "$target" ]]; then
     do_continue=1
+    resume_from=$(stat -c '%s' -- "$target" 2>/dev/null || printf '0')
   fi
   if (( do_continue )); then
     curl_args+=( -C - )
@@ -448,6 +468,8 @@ cget_run_one() {
   curl_args+=( "${curl_passthru[@]}" "${out_args[@]}" -- "$url" )
 
   local ec=0
+  # Expose prior size to the progress parser (curl's meter is Range-local).
+  export CGET_RESUME_FROM="$resume_from"
 
   # Do not block in `wait <bg-pid>`: bash defers INT/TERM traps until that
   # wait returns, so Ctrl+C would not stop curl until the transfer ended.
@@ -461,7 +483,12 @@ cget_run_one() {
     done
     wait "$cget_curl_pid" || ec=$?
     cget_curl_pid=
+    unset CGET_RESUME_FROM
     return "$ec"
+  fi
+
+  if (( resume_from > 0 )); then
+    printf 'Resuming from %s\n' "$(cget_fmt_size "$resume_from")" >&2
   fi
 
   # Live status line via curl progress meter → parser (FIFO).
@@ -481,6 +508,7 @@ cget_run_one() {
   cget_parser_pid=
   rm -f -- "$cget_fifo"
   cget_fifo=
+  unset CGET_RESUME_FROM
   return "$ec"
 }
 

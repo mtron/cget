@@ -61,7 +61,7 @@ cget -- --retry-all-errors --max-time 600 https://example.com/file.bin
 
 - Default destination is `~/Downloads`. Customize via `-P <dir>`.
 - Filename comes from `Content-Disposition` when present, otherwise URL basename.
-- If the target file already exists and is non-empty, resume with `curl -C -` automatically.
+- If the target file already exists and is non-empty, resume with `curl -C -` automatically; the status line shows overall file progress (not only the remaining Range).
 - Built-in curl defaults: `-L --fail --remote-time --retry 3 --connect-timeout 10`.
 - The status line is parsed from `curl --progress-meter` (works when stderr is not a TTY).
 - Ctrl+C kills curl immediately (does not wait for the next progress update or a retry).
