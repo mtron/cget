@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# cget — wget-like curl wrapper with a live [Download] status line.
+# Requires: bash >= 5, curl >= 7.73 (tested: bash 5.3.9, curl 8.18.0)
+set -euo pipefail
+
+CGET_VERSION="0.1.0"
+
+cget_usage() {
+  cat <<'EOF'
+Usage: cget [OPTION]... URL...
+
+Download files with curl, wget-style defaults, and a live status line.
+
+With only a URL (no -O/-P), files go to ~/Downloads/ (created if needed),
+named from Content-Disposition when present, else the URL path.
+
+Options (wget-like):
+  -O, --output-document=FILE   write to FILE ("-" = stdout)
+  -P, --directory-prefix=DIR   save under DIR (default: ~/Downloads when
+                               no -O is given)
+  -c, --continue               resume partial download (curl -C -)
+  -q, --quiet                  silence status line and curl noise
+  -nv, --no-verbose            like default: status line only, no curl -v
+  -h, --help                   show this help
+  -V, --version                show version
+
+Unknown options are forwarded to curl. Separate curl-only flags with --
+if needed, e.g. cget -- --retry 3 URL
+
+Status line example:
+  [Download]   1.9% of   73.91MiB at   54.19KiB/s (50 KiB/s Ø)    ETA 22:50
+EOF
+}
+
+# --- size / time helpers -------------------------------------------------
+
+# Parse curl progress size/speed tokens: 123, 1.00k, 1.00M, 1.00G, 1.00T
+cget_to_bytes() {
+  local tok=${1:-0}
+  [[ "$tok" == "--" || -z "$tok" ]] && { printf '0'; return; }
+  if [[ "$tok" =~ ^([0-9]+)([kMGT])$ ]]; then
+    local n=${BASH_REMATCH[1]} u=${BASH_REMATCH[2]}
+    case "$u" in
+      k) printf '%s' $((n * 1024)) ;;
+      M) printf '%s' $((n * 1024 * 1024)) ;;
+      G) printf '%s' $((n * 1024 * 1024 * 1024)) ;;
+      T) printf '%s' $((n * 1024 * 1024 * 1024 * 1024)) ;;
+    esac
+    return
+  fi
+  if [[ "$tok" =~ ^([0-9]+\.[0-9]+)([kMGT])$ ]]; then
+    local n=${BASH_REMATCH[1]} u=${BASH_REMATCH[2]} mult=1
+    case "$u" in
+      k) mult=1024 ;;
+      M) mult=$((1024 * 1024)) ;;
+      G) mult=$((1024 * 1024 * 1024)) ;;
+      T) mult=$((1024 * 1024 * 1024 * 1024)) ;;
+    esac
+    # bash integer math via awk for fractional k/M/G
+    awk -v n="$n" -v m="$mult" 'BEGIN { printf "%d", n * m + 0.5 }'
+    return
+  fi
+  if [[ "$tok" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$tok"
+    return
+  fi
+  printf '0'
+}
+
+# Format bytes as 12.34KiB / 73.91MiB (no space); bare bytes without unit suffix change
+cget_fmt_size() {
+  local b=${1:-0}
+  awk -v b="$b" 'BEGIN {
+    if (b < 1024) { printf "%dB", b; exit }
+    if (b < 1024 * 1024) { printf "%.2fKiB", b / 1024; exit }
+    if (b < 1024 * 1024 * 1024) { printf "%.2fMiB", b / (1024 * 1024); exit }
+    printf "%.2fGiB", b / (1024 * 1024 * 1024)
+  }'
+}
+
+# Current speed: 54.19KiB/s (no space before unit)
+cget_fmt_speed() {
+  local bps=${1:-0}
+  awk -v b="$bps" 'BEGIN {
+    if (b < 1024) { printf "%dB/s", b; exit }
+    if (b < 1024 * 1024) { printf "%.2fKiB/s", b / 1024; exit }
+    if (b < 1024 * 1024 * 1024) { printf "%.2fMiB/s", b / (1024 * 1024); exit }
+    printf "%.2fGiB/s", b / (1024 * 1024 * 1024)
+  }'
+}
+
+# Average speed inside Ø: "50 KiB/s" (space before unit; drop .00)
+cget_fmt_avg_speed() {
+  local bps=${1:-0}
+  awk -v b="$bps" 'BEGIN {
+    if (b < 1024) { printf "%d B/s", b; exit }
+    if (b < 1024 * 1024) {
+      v = b / 1024
+      if (v == int(v)) printf "%d KiB/s", v; else printf "%.2f KiB/s", v
+      exit
+    }
+    if (b < 1024 * 1024 * 1024) {
+      v = b / (1024 * 1024)
+      if (v == int(v)) printf "%d MiB/s", v; else printf "%.2f MiB/s", v
+      exit
+    }
+    v = b / (1024 * 1024 * 1024)
+    if (v == int(v)) printf "%d GiB/s", v; else printf "%.2f GiB/s", v
+  }'
+}
+
+cget_fmt_eta() {
+  local secs=${1:-0}
+  if (( secs < 0 )); then secs=0; fi
+  local h=$((secs / 3600)) m=$(((secs % 3600) / 60)) s=$((secs % 60))
+  if (( h > 0 )); then
+    printf '%d:%02d:%02d' "$h" "$m" "$s"
+  else
+    printf '%02d:%02d' "$m" "$s"
+  fi
+}
+
+# Parse curl "Left" time token (00:22, 1:02:03, --:--:--) → seconds; -1 if unknown
+cget_parse_eta_token() {
+  local t=${1:-}
+  [[ -z "$t" || "$t" == *--* ]] && { printf '%s' '-1'; return; }
+  if [[ "$t" =~ ^([0-9]+):([0-9]{2}):([0-9]{2})$ ]]; then
+    printf '%s' $((10#${BASH_REMATCH[1]} * 3600 + 10#${BASH_REMATCH[2]} * 60 + 10#${BASH_REMATCH[3]}))
+    return
+  fi
+  if [[ "$t" =~ ^([0-9]+):([0-9]{2})$ ]]; then
+    printf '%s' $((10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+    return
+  fi
+  printf '%s' '-1'
+}
+
+# --- progress meter parser ----------------------------------------------
+
+cget_progress_parser() {
+  local line fields n pct total_b recv_b avg_bps cur_bps eta_secs eta_str
+  local total_tok recv_tok avg_tok cur_tok left_tok
+  # Read CR-delimited updates from curl --progress-meter
+  while IFS= read -r -d $'\r' line || [[ -n "${line:-}" ]]; do
+    # Drop any leftover newlines / header rows
+    line=${line//$'\n'/ }
+    [[ "$line" == *'%'*Total* ]] && continue
+    [[ "$line" == *Dload* && "$line" == *Upload* ]] && continue
+    # shellcheck disable=SC2206
+    fields=($line)
+    n=${#fields[@]}
+    # Need at least 11 tokens. On completion curl often blanks "Time Left",
+    # yielding 11 fields with Current Speed as the last token.
+    (( n < 11 )) && continue
+
+    # %tot tot %recv recv %xfer xfer avgD avgU tTot tSpent [tLeft] cur
+    total_tok=${fields[1]}
+    pct=${fields[2]}
+    recv_tok=${fields[3]}
+    avg_tok=${fields[6]}
+    cur_tok=${fields[n - 1]}
+    if (( n >= 12 )); then
+      left_tok=${fields[10]}
+    else
+      left_tok='--:--'
+    fi
+
+    total_b=$(cget_to_bytes "$total_tok")
+    recv_b=$(cget_to_bytes "$recv_tok")
+    avg_bps=$(cget_to_bytes "$avg_tok")
+    cur_bps=$(cget_to_bytes "$cur_tok")
+
+    # Prefer precise percent from byte counts when total known
+    if (( total_b > 0 )); then
+      pct=$(awk -v r="$recv_b" -v t="$total_b" 'BEGIN { printf "%.1f", (r * 100) / t }')
+    else
+      pct=$(awk -v p="$pct" 'BEGIN { printf "%.1f", p+0 }')
+    fi
+
+    eta_secs=$(cget_parse_eta_token "$left_tok")
+    if (( eta_secs < 0 )) && (( cur_bps > 0 && total_b > recv_b )); then
+      eta_secs=$(( (total_b - recv_b) / cur_bps ))
+    fi
+    # Finished (or unknown left): show 00:00 once bytes are complete
+    if (( total_b > 0 && recv_b >= total_b )); then
+      eta_secs=0
+    fi
+
+    if (( total_b <= 0 )); then
+      printf '\r[Download]    ?%% of        ? at %12s (%s Ø)    ETA --:--' \
+        "$(cget_fmt_speed "$cur_bps")" \
+        "$(cget_fmt_avg_speed "$avg_bps")" >&2
+    else
+      if (( eta_secs < 0 )); then
+        eta_str='--:--'
+      else
+        eta_str=$(cget_fmt_eta "$eta_secs")
+      fi
+      # [Download]   1.9% of   73.91MiB at   54.19KiB/s (50 KiB/s Ø)    ETA 22:50
+      printf '\r[Download] %5s%% of %9s at %12s (%s Ø)    ETA %s' \
+        "$pct" \
+        "$(cget_fmt_size "$total_b")" \
+        "$(cget_fmt_speed "$cur_bps")" \
+        "$(cget_fmt_avg_speed "$avg_bps")" \
+        "$eta_str" >&2
+    fi
+  done
+  printf '\n' >&2
+}
+
+# --- filename helpers ----------------------------------------------------
+
+cget_basename_from_url() {
+  local u=$1
+  u=${u%%\?*}
+  u=${u%%\#*}
+  u=${u%/}
+  local base=${u##*/}
+  if [[ -z "$base" || "$base" == "$u" ]]; then
+    base="index.html"
+  fi
+  base=${base//\%20/ }
+  printf '%s' "$base"
+}
+
+# Best-effort Content-Disposition filename (wget-like); falls back to URL basename.
+cget_probe_filename() {
+  local url=$1
+  local headers cd name
+  headers=$(curl -sSIL --max-redirs 10 --compressed "$url" 2>/dev/null || true)
+  cd=$(printf '%s\n' "$headers" | tr -d '\r' | grep -i '^content-disposition:' | tail -n1 || true)
+  if [[ -z "$cd" ]]; then
+    cget_basename_from_url "$url"
+    return
+  fi
+  if [[ "$cd" =~ [Ff][Ii][Ll][Ee][Nn][Aa][Mm][Ee]\*=[^\'\;\ ]+\'\'([^\;]+) ]]; then
+    name=${BASH_REMATCH[1]}
+    printf -v name '%b' "${name//%/\\x}" 2>/dev/null || true
+    name=${name##*/}
+    printf '%s' "$name"
+    return
+  fi
+  if [[ "$cd" =~ [Ff][Ii][Ll][Ee][Nn][Aa][Mm][Ee]=\"([^\"]+)\" ]]; then
+    printf '%s' "${BASH_REMATCH[1]##*/}"
+    return
+  fi
+  if [[ "$cd" =~ [Ff][Ii][Ll][Ee][Nn][Aa][Mm][Ee]=([^\;[:space:]]+) ]]; then
+    name=${BASH_REMATCH[1]##*/}
+    printf '%s' "${name//\"/}"
+    return
+  fi
+  cget_basename_from_url "$url"
+}
+
+# Take a curl long-option argument when the next token is not a flag/URL.
+cget_take_curl_optarg() {
+  if [[ $# -ge 2 && "$2" != -* && "$2" != *://* && "$1" == --* && "$1" != --*=* ]]; then
+    curl_passthru+=("$2")
+    return 0
+  fi
+  return 1
+}
+
+# --- argument parsing ----------------------------------------------------
+
+opt_outdir=""
+opt_outfile=""
+opt_continue=0
+opt_quiet=0
+have_outdir=0
+have_outfile=0
+stdout_mode=0
+curl_passthru=()
+urls=()
+
+while (($#)); do
+  case "$1" in
+    -h|--help)
+      cget_usage
+      exit 0
+      ;;
+    -V|--version)
+      printf 'cget %s\n' "$CGET_VERSION"
+      exit 0
+      ;;
+    -q|--quiet)
+      opt_quiet=1
+      shift
+      ;;
+    -nv|--no-verbose)
+      # status line on; no curl --verbose (default)
+      shift
+      ;;
+    -c|--continue)
+      opt_continue=1
+      shift
+      ;;
+    -O|--output-document)
+      [[ $# -ge 2 ]] || { echo "cget: $1 needs an argument" >&2; exit 2; }
+      opt_outfile=$2
+      have_outfile=1
+      shift 2
+      ;;
+    --output-document=*)
+      opt_outfile=${1#*=}
+      have_outfile=1
+      shift
+      ;;
+    -O*)
+      # -Ofile / -O-
+      opt_outfile=${1#-O}
+      have_outfile=1
+      shift
+      ;;
+    -P|--directory-prefix)
+      [[ $# -ge 2 ]] || { echo "cget: $1 needs an argument" >&2; exit 2; }
+      opt_outdir=$2
+      have_outdir=1
+      shift 2
+      ;;
+    --directory-prefix=*)
+      opt_outdir=${1#*=}
+      have_outdir=1
+      shift
+      ;;
+    -P*)
+      opt_outdir=${1#-P}
+      have_outdir=1
+      shift
+      ;;
+    --)
+      shift
+      while (($#)); do
+        if [[ "$1" == -* ]]; then
+          curl_passthru+=("$1")
+          if cget_take_curl_optarg "$@"; then
+            shift
+          fi
+          shift
+        else
+          urls+=("$1")
+          shift
+        fi
+      done
+      break
+      ;;
+    -*)
+      # Forward unknown flags to curl
+      curl_passthru+=("$1")
+      if cget_take_curl_optarg "$@"; then
+        shift
+      fi
+      shift
+      ;;
+    *)
+      urls+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if ((${#urls[@]} == 0)); then
+  echo "cget: missing URL" >&2
+  cget_usage >&2
+  exit 2
+fi
+
+if [[ "$have_outfile" -eq 1 && "$opt_outfile" == "-" ]]; then
+  stdout_mode=1
+fi
+
+# Default directory when no -O: ~/Downloads (wget-like "save somewhere useful")
+if [[ "$have_outfile" -eq 0 && "$have_outdir" -eq 0 ]]; then
+  opt_outdir="${HOME}/Downloads"
+  have_outdir=1
+fi
+if [[ "$have_outdir" -eq 1 && -z "$opt_outdir" ]]; then
+  opt_outdir="."
+fi
+
+# --- run one download ----------------------------------------------------
+
+cget_run_one() {
+  local url=$1
+  local curl_args=( -L --fail --remote-time )
+  local out_args=()
+  local target=""
+
+  if (( opt_continue )); then
+    curl_args+=( -C - )
+  fi
+
+  if (( stdout_mode )); then
+    out_args=() # body to stdout
+  elif (( have_outfile )); then
+    target=$opt_outfile
+    if (( have_outdir )) && [[ "$target" != /* ]]; then
+      target="${opt_outdir%/}/$target"
+    fi
+    mkdir -p "$(dirname -- "$target")"
+    out_args=( -o "$target" )
+  else
+    # Automatic name into outdir (default ~/Downloads). Resolve the name ourselves
+    # so -c/--continue works (curl forbids combining -C with -J).
+    local dir=${opt_outdir:-$HOME/Downloads}
+    mkdir -p -- "$dir"
+    local name
+    name=$(cget_probe_filename "$url")
+    target="${dir%/}/$name"
+    out_args=( -o "$target" )
+  fi
+
+  curl_args+=( "${curl_passthru[@]}" "${out_args[@]}" -- "$url" )
+
+  if (( opt_quiet )); then
+    curl_args=( --silent --show-error --no-progress-meter "${curl_args[@]}" )
+    curl "${curl_args[@]}"
+    return
+  fi
+
+  # Live status line via curl progress meter → parser (FIFO so we can wait)
+  curl_args=( --progress-meter "${curl_args[@]}" )
+  local ec=0 fifo ppid
+  fifo=$(mktemp -u --tmpdir cget-progress.XXXXXX)
+  mkfifo -- "$fifo"
+  cget_progress_parser <"$fifo" &
+  ppid=$!
+  # stderr → fifo; stdout remains response body (stdout mode) or unused
+  curl "${curl_args[@]}" 2>"$fifo" || ec=$?
+  wait "$ppid" || true
+  rm -f -- "$fifo"
+  return "$ec"
+}
+
+ec=0
+for url in "${urls[@]}"; do
+  if ! cget_run_one "$url"; then
+    ec=$?
+  fi
+done
+exit "$ec"
