@@ -10,8 +10,8 @@ Requires **bash ≥ 5** and **curl ≥ 7.73**
 ```bash
 mkdir -p $HOME/work/cget && cd $HOME/work
 git clone https://git.glasn.net/mtron/cget.git
-
-Load the script as ~/.bashrc - function
+```
+Load the script as a bash function by adding this one-liner to your ~/.bashrc :
 
 ```bash
 # cget - wget like wrapper for curl
