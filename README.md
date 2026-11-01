@@ -4,26 +4,26 @@ A small bash wrapper around `curl` with wget-like defaults.
 
 Requires **bash ≥ 5** and **curl ≥ 7.73**
 
-## Install (bashrc)
+## Install
 
-Prefer keeping the script in this repo and putting it on your `PATH`, or wrapping it in a function:
-
-```bash
-# ~/.bashrc — one-liner (PATH)
-export PATH="$HOME/work/cget:$PATH"
-```
 
 ```bash
-# ~/.bashrc — one-liner (function; no PATH change)
+mkdir -p $HOME/work/cget && cd $HOME/work
+git clone https://git.glasn.net/mtron/cget.git
+
+Load the script as ~/.bashrc - function
+
+```bash
+# cget - wget like wrapper for curl
 cget() { "$HOME/work/cget/cget" "$@"; }
 ```
 
-Then `source ~/.bashrc` or open a new shell. The script is `~/work/cget/cget` (executable).
+Then `source ~/.bashrc` or open a new shell.
 
 ## Usage
 
 ```bash
-# Save into ~/Downloads (created if missing), name from URL / Content-Disposition
+# Save into ~/Downloads, name from Content-Disposition (URL Fallback)
 cget https://example.com/file.tar.gz
 
 # Explicit output file / stdout
