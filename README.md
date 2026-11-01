@@ -1,12 +1,8 @@
 # cget
 
-A small bash wrapper around `curl` with wget-like defaults and a live download status line.
+A small bash wrapper around `curl` with wget-like defaults.
 
-```
-[Download]   1.9% of   73.91MiB at   54.19KiB/s (50 KiB/s Ø)    ETA 22:50
-```
-
-Requires **bash ≥ 5** and **curl ≥ 7.73** (developed against bash 5.3.9 and curl 8.18.0).
+Requires **bash ≥ 5** and **curl ≥ 7.73**
 
 ## Install (bashrc)
 
@@ -59,8 +55,9 @@ Unknown flags are forwarded to `curl`. Use `--` to pass curl-only options unambi
 cget -- --retry-all-errors --max-time 600 https://example.com/file.bin
 ```
 
-## How it works
+## Logic
 
-- Default destination is `~/Downloads`; the filename comes from `Content-Disposition` when present, otherwise the URL basename.
+- Default destination is `~/Downloads`; 
+- filename comes from `Content-Disposition` when present, otherwise URL basename.
 - Built-in curl defaults for downloads: `-L --fail --remote-time --retry 3 --connect-timeout 10`.
-- The status line is parsed from `curl --progress-meter` (forced on so it works when stderr is not a TTY) and rewritten into the `[Download] … Ø … ETA` format.
+- The status line is parsed from `curl --progress-meter` (works when stderr is not a TTY)

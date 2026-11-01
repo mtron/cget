@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cget — wget-like curl wrapper with a live [Download] status line.
+# cget - wget like curl wrapper
 # Requires: bash >= 5, curl >= 7.73 (tested: bash 5.3.9, curl 8.18.0)
 set -euo pipefail
 
@@ -9,15 +9,14 @@ cget_usage() {
   cat <<'EOF'
 Usage: cget [OPTION]... URL...
 
-Download files with curl, wget-style defaults, and a live status line.
+Download files with curl, uses wget-style defaults
 
 With only a URL (no -O/-P), files go to ~/Downloads/ (created if needed),
 named from Content-Disposition when present, else the URL path.
 
 Options (wget-like):
   -O, --output-document=FILE   write to FILE ("-" = stdout)
-  -P, --directory-prefix=DIR   save under DIR (default: ~/Downloads when
-                               no -O is given)
+  -P, --directory-prefix=DIR   save under DIR (default: ~/Downloads)
   -c, --continue               resume partial download (curl -C -)
   -q, --quiet                  silence status line and curl noise
   -nv, --no-verbose            like default: status line only, no curl -v
@@ -27,9 +26,6 @@ Options (wget-like):
 Built-in curl defaults: -L --fail --remote-time --retry 3 --connect-timeout 10.
 Unknown options are forwarded to curl. Separate curl-only flags with --
 if needed, e.g. cget -- --retry-all-errors URL
-
-Status line example:
-  [Download]   1.9% of   73.91MiB at   54.19KiB/s (50 KiB/s Ø)    ETA 22:50
 EOF
 }
 
