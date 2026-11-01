@@ -1,6 +1,6 @@
 # cget
 
-A small bash wrapper around `curl` with wget-like defaults.
+A bash wrapper around `curl` with wget-like defaults.
 
 Requires **bash ≥ 5** and **curl ≥ 7.73**
 
@@ -9,7 +9,7 @@ Requires **bash ≥ 5** and **curl ≥ 7.73**
 
 ```bash
 mkdir -p $HOME/work && cd $HOME/work
-git clone https://git.glasn.net/mtron/cget.git
+git clone https://github.com/mtron/cget.git
 ```
 Load the script as a bash function by adding this one-liner to your ~/.bashrc :
 
@@ -57,7 +57,7 @@ cget -- --retry-all-errors --max-time 600 https://example.com/file.bin
 
 ## Logic
 
-- Default destination is `~/Downloads`; 
+- Default destination is `~/Downloads`. Customize via `-P <dir>`.
 - filename comes from `Content-Disposition` when present, otherwise URL basename.
 - Built-in curl defaults for downloads: `-L --fail --remote-time --retry 3 --connect-timeout 10`.
 - The status line is parsed from `curl --progress-meter` (works when stderr is not a TTY)
