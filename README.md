@@ -33,10 +33,12 @@ cget -O - https://example.com/file.tar.gz | tar -tzf -
 # Directory prefix (wget -P)
 cget -P /tmp https://example.com/file.tar.gz
 
-# Resume, quiet
-cget -c https://example.com/big.iso
+# Resume is automatic when the target file already exists; -c forces it
+cget https://example.com/big.iso
 cget -q https://example.com/file.tar.gz
 ```
+
+Ctrl+C stops the transfer immediately (curl is killed; no retry after abort).
 
 ### Options
 
@@ -44,7 +46,7 @@ cget -q https://example.com/file.tar.gz
 |--------|---------|
 | `-O`, `--output-document=FILE` | Write to `FILE` (`-` = stdout) |
 | `-P`, `--directory-prefix=DIR` | Save under `DIR` |
-| `-c`, `--continue` | Resume (`curl -C -`) |
+| `-c`, `--continue` | Force resume (`curl -C -`; also auto if target exists) |
 | `-q`, `--quiet` | No status line / curl noise |
 | `-nv`, `--no-verbose` | Status line only (default behaviour) |
 | `-h`, `--help` / `-V`, `--version` | Help / version |
@@ -58,6 +60,8 @@ cget -- --retry-all-errors --max-time 600 https://example.com/file.bin
 ## Logic
 
 - Default destination is `~/Downloads`. Customize via `-P <dir>`.
-- filename comes from `Content-Disposition` when present, otherwise URL basename.
-- Built-in curl defaults for downloads: `-L --fail --remote-time --retry 3 --connect-timeout 10`.
-- The status line is parsed from `curl --progress-meter` (works when stderr is not a TTY)
+- Filename comes from `Content-Disposition` when present, otherwise URL basename.
+- If the target file already exists and is non-empty, resume with `curl -C -` automatically.
+- Built-in curl defaults: `-L --fail --remote-time --retry 3 --connect-timeout 10`.
+- The status line is parsed from `curl --progress-meter` (works when stderr is not a TTY).
+- Ctrl+C kills curl immediately (does not wait for the next progress update or a retry).

@@ -17,7 +17,7 @@ named from Content-Disposition when present, else the URL path.
 Options (wget-like):
   -O, --output-document=FILE   write to FILE ("-" = stdout)
   -P, --directory-prefix=DIR   save under DIR (default: ~/Downloads)
-  -c, --continue               resume partial download (curl -C -)
+  -c, --continue               force resume (also automatic if target exists)
   -q, --quiet                  silence status line and curl noise
   -nv, --no-verbose            like default: status line only, no curl -v
   -h, --help                   show this help
@@ -375,6 +375,33 @@ if [[ "$have_outdir" -eq 1 && -z "$opt_outdir" ]]; then
   opt_outdir="."
 fi
 
+# --- signals / child PIDs (Ctrl+C must kill curl immediately) ------------
+
+cget_curl_pid=
+cget_parser_pid=
+cget_fifo=
+
+cget_kill_children() {
+  # Hard-kill so the transfer stops immediately (no curl --retry after abort).
+  if [[ -n "${cget_curl_pid:-}" ]]; then
+    kill -KILL "$cget_curl_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${cget_parser_pid:-}" ]]; then
+    kill -KILL "$cget_parser_pid" 2>/dev/null || true
+  fi
+  [[ -n "${cget_fifo:-}" ]] && rm -f -- "$cget_fifo"
+}
+
+cget_on_interrupt() {
+  trap - INT TERM
+  cget_kill_children
+  printf '\n' >&2
+  exit 130
+}
+
+trap 'cget_on_interrupt' INT
+trap 'cget_on_interrupt' TERM
+
 # --- run one download ----------------------------------------------------
 
 cget_run_one() {
@@ -387,10 +414,7 @@ cget_run_one() {
   )
   local out_args=()
   local target=""
-
-  if (( opt_continue )); then
-    curl_args+=( -C - )
-  fi
+  local do_continue=$opt_continue
 
   if (( stdout_mode )); then
     out_args=() # body to stdout
@@ -403,7 +427,7 @@ cget_run_one() {
     out_args=( -o "$target" )
   else
     # Automatic name into outdir (default ~/Downloads). Resolve the name ourselves
-    # so -c/--continue works (curl forbids combining -C with -J).
+    # so resume works (curl forbids combining -C with -J).
     local dir=${opt_outdir:-$HOME/Downloads}
     mkdir -p -- "$dir"
     local name
@@ -412,25 +436,51 @@ cget_run_one() {
     out_args=( -o "$target" )
   fi
 
-  curl_args+=( "${curl_passthru[@]}" "${out_args[@]}" -- "$url" )
-
-  if (( opt_quiet )); then
-    curl_args=( --silent --show-error --no-progress-meter "${curl_args[@]}" )
-    curl "${curl_args[@]}"
-    return
+  # Auto-resume when the target already exists and has data (wget -c behaviour
+  # without requiring -c every time). Skip for stdout.
+  if [[ -n "$target" && -f "$target" && -s "$target" ]]; then
+    do_continue=1
+  fi
+  if (( do_continue )); then
+    curl_args+=( -C - )
   fi
 
-  # Live status line via curl progress meter → parser (FIFO so we can wait)
+  curl_args+=( "${curl_passthru[@]}" "${out_args[@]}" -- "$url" )
+
+  local ec=0
+
+  # Do not block in `wait <bg-pid>`: bash defers INT/TERM traps until that
+  # wait returns, so Ctrl+C would not stop curl until the transfer ended.
+  # A short sleep loop lets the trap run and hard-kill curl immediately.
+  if (( opt_quiet )); then
+    curl_args=( --silent --show-error --no-progress-meter "${curl_args[@]}" )
+    curl "${curl_args[@]}" &
+    cget_curl_pid=$!
+    while kill -0 "$cget_curl_pid" 2>/dev/null; do
+      sleep 0.1 || true
+    done
+    wait "$cget_curl_pid" || ec=$?
+    cget_curl_pid=
+    return "$ec"
+  fi
+
+  # Live status line via curl progress meter → parser (FIFO).
   curl_args=( --progress-meter "${curl_args[@]}" )
-  local ec=0 fifo ppid
-  fifo=$(mktemp -u --tmpdir cget-progress.XXXXXX)
-  mkfifo -- "$fifo"
-  cget_progress_parser <"$fifo" &
-  ppid=$!
-  # stderr → fifo; stdout remains response body (stdout mode) or unused
-  curl "${curl_args[@]}" 2>"$fifo" || ec=$?
-  wait "$ppid" || true
-  rm -f -- "$fifo"
+  cget_fifo=$(mktemp -u --tmpdir cget-progress.XXXXXX)
+  mkfifo -- "$cget_fifo"
+  cget_progress_parser <"$cget_fifo" &
+  cget_parser_pid=$!
+  curl "${curl_args[@]}" 2>"$cget_fifo" &
+  cget_curl_pid=$!
+  while kill -0 "$cget_curl_pid" 2>/dev/null; do
+    sleep 0.1 || true
+  done
+  wait "$cget_curl_pid" || ec=$?
+  cget_curl_pid=
+  wait "$cget_parser_pid" || true
+  cget_parser_pid=
+  rm -f -- "$cget_fifo"
+  cget_fifo=
   return "$ec"
 }
 
