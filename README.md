@@ -56,10 +56,11 @@ cget -q https://example.com/file.tar.gz
 Unknown flags are forwarded to `curl`. Use `--` to pass curl-only options unambiguously:
 
 ```bash
-cget -- --retry 3 --connect-timeout 10 https://example.com/file.bin
+cget -- --retry-all-errors --max-time 600 https://example.com/file.bin
 ```
 
 ## How it works
 
-- Default destination is `~/Downloads` with `curl -O -J --output-dir` (URL basename, or `Content-Disposition` when present).
+- Default destination is `~/Downloads`; the filename comes from `Content-Disposition` when present, otherwise the URL basename.
+- Built-in curl defaults for downloads: `-L --fail --remote-time --retry 3 --connect-timeout 10`.
 - The status line is parsed from `curl --progress-meter` (forced on so it works when stderr is not a TTY) and rewritten into the `[Download] … Ø … ETA` format.

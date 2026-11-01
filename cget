@@ -24,8 +24,9 @@ Options (wget-like):
   -h, --help                   show this help
   -V, --version                show version
 
+Built-in curl defaults: -L --fail --remote-time --retry 3 --connect-timeout 10.
 Unknown options are forwarded to curl. Separate curl-only flags with --
-if needed, e.g. cget -- --retry 3 URL
+if needed, e.g. cget -- --retry-all-errors URL
 
 Status line example:
   [Download]   1.9% of   73.91MiB at   54.19KiB/s (50 KiB/s Ø)    ETA 22:50
@@ -382,7 +383,12 @@ fi
 
 cget_run_one() {
   local url=$1
-  local curl_args=( -L --fail --remote-time )
+  # Download-manager defaults; unknown CLI flags still append via curl_passthru.
+  local curl_args=(
+    -L --fail --remote-time
+    --retry 3
+    --connect-timeout 10
+  )
   local out_args=()
   local target=""
 
